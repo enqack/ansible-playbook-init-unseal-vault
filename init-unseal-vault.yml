@@ -1,0 +1,89 @@
+---
+## ansible-playbook -e "@vault/passwd.yml" init-unseal-vault.yml --check
+
+- hosts: vault_instances
+    
+  vars:
+    display_init_response: false
+    tls_skip_verify: true
+    vault_secret_shares: 3
+    vault_secret_threshold: 2
+    vault_tls_disable: true
+
+
+  pre_tasks:
+
+
+  tasks:
+    # The default status codes are:
+    #   200 if initialized, unsealed, and active
+    #   429 if unsealed and standby
+    #   472 if data recovery mode replication secondary and active
+    #   501 if not initialized
+    #   503 if sealed
+    - name: Check if vault it initalized
+      uri:
+        url: "{{ vault_tls_disable | ternary('http', 'https') }}://{{ inventory_hostname }}:8200/v1/sys/health"
+        validate_certs: "{{ tls_skip_verify | ternary('false', 'true') }}"
+        status_code: 200,429,472,501,503
+      register: vault_health_response
+      run_once: true
+
+
+    - block:
+      - name: Initialize vault
+        uri:
+          url: "{{ vault_tls_disable | ternary('http', 'https') }}://{{ inventory_hostname }}:8200/v1/sys/init"
+          body:
+            secret_shares: "{{ vault_secret_shares }}"
+            secret_threshold: "{{ vault_secret_threshold }}"
+          body_format: json
+          method: PUT
+          validate_certs: "{{ tls_skip_verify | ternary('false', 'true') }}"
+        register: init_vault_response
+
+      - name: Save vault root token and keys
+        set_fact:
+          vault_root_token: "{{ init_vault_response.json.root_token }}"
+          vault_keys: "{{ init_vault_response.json.keys_base64 }}"
+
+      - name: Display vault root token
+        debug:
+          msg: "Root Token: {{ vault_root_token }}"
+        when: display_init_response | bool
+
+      - name: Display vault keys # separate for pretty printing
+        debug:
+          msg: "Vault keys: {{ vault_keys }}"
+        when: display_init_response | bool
+
+      no_log: false
+      run_once: true
+      when:
+        - vault_health_response.status == 501
+
+    - name: Check if vault is sealed
+      uri:
+        url: "{{ vault_tls_disable | ternary('http', 'https') }}://{{ inventory_hostname }}:8200/v1/sys/health"
+        validate_certs: "{{ tls_skip_verify | ternary('false', 'true') }}"
+        status_code: 200,429,472,501,503
+      register: vault_health_response
+      run_once: true
+
+    - name: Unseal vault
+      uri:
+        url: "{{ vault_tls_disable | ternary('http', 'https') }}://{{ inventory_hostname }}:8200/v1/sys/unseal"
+        body:
+          key: "{{ item }}"
+        body_format: json
+        method: PUT
+        validate_certs: "{{ tls_skip_verify | ternary('false', 'true') }}"
+      register: unseal_vault_response
+      no_log: true
+      run_once: true
+      with_items:
+        - "{{ vault_keys }}"
+      when:
+        - vault_health_response.status == 503
+        - vault_health_response.status != 501
+        - vault_keys is defined
